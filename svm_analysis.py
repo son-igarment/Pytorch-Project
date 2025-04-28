@@ -51,6 +51,11 @@ def prepare_features(stock_data, beta_values, days_to_predict=5):
     # Convert date strings to datetime
     df['TradeDate'] = pd.to_datetime(df['TradeDate'])
     
+    # Convert numeric columns to float to ensure consistency
+    numeric_columns = ['OpenPrice', 'HighestPrice', 'LowestPrice', 'ClosePrice', 'TotalVolume']
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
     # Sort by date
     df = df.sort_values(['MarketCode', 'Ticker', 'TradeDate'])
     
@@ -62,6 +67,9 @@ def prepare_features(stock_data, beta_values, days_to_predict=5):
     all_targets = []
     all_stock_codes = []
     all_dates = []
+    
+    # Initialize feature count to ensure uniform dimensions
+    feature_count = None
     
     # Điều chỉnh ngưỡng phần trăm dựa trên days_to_predict
     if days_to_predict <= 2:
@@ -85,65 +93,93 @@ def prepare_features(stock_data, beta_values, days_to_predict=5):
                 beta_value = beta_row.iloc[0]['beta']
         
         # Calculate technical indicators
-        group = calculate_technical_indicators(group)
-        
-        # Drop rows with NaN (due to rolling calculations)
-        group = group.dropna()
-        
-        # Prepare features
-        for i in range(len(group) - days_to_predict):
-            # Current data point
-            current_data = group.iloc[i]
+        try:
+            group = calculate_technical_indicators(group)
             
-            # Features
-            features = [
-                current_data['ClosePrice'],         # Current price
-                current_data['rsi_14'],               # RSI
-                current_data['macd'],                 # MACD
-                current_data['macd_signal'],          # MACD Signal
-                current_data['upper_band'],           # Bollinger Upper
-                current_data['lower_band'],           # Bollinger Lower
-                current_data['obv'],                  # On-Balance Volume
-                current_data['atr_14'],               # Average True Range
-                current_data['volatility_20'],        # Volatility
-            ]
+            # Drop rows with NaN (due to rolling calculations)
+            group = group.dropna()
             
-            # Add beta as a feature if available
-            if beta_value is not None:
-                features.append(beta_value)
-            
-            # Target: Will the price go up in the next 'days_to_predict' days?
-            future_price = float(group.iloc[i + days_to_predict]['ClosePrice'])
-            current_price = float(current_data['ClosePrice'])
-            
-            # Classify as 1 (up), 0 (neutral), -1 (down) with adjusted thresholds
-            percent_change = (future_price - current_price) / current_price * 100
-            
-            if percent_change > threshold_pct:  # Up more than threshold_pct
-                target = 1
-            elif percent_change < -threshold_pct:  # Down more than threshold_pct
-                target = -1
-            else:  # Between -threshold_pct and threshold_pct
-                target = 0
-            
-            all_features.append(features)
-            all_targets.append(target)
-            all_stock_codes.append(stock_code)
-            all_dates.append(current_data['TradeDate'])
+            # Prepare features
+            for i in range(len(group) - days_to_predict):
+                # Current data point
+                current_data = group.iloc[i]
+                
+                # Features
+                features = [
+                    float(current_data['ClosePrice']),        # Current price
+                    float(current_data['rsi_14']),            # RSI
+                    float(current_data['macd']),              # MACD
+                    float(current_data['macd_signal']),       # MACD Signal
+                    float(current_data['upper_band']),        # Bollinger Upper
+                    float(current_data['lower_band']),        # Bollinger Lower
+                    float(current_data['obv']),               # On-Balance Volume
+                    float(current_data['atr_14']),            # Average True Range
+                    float(current_data['volatility_20']),     # Volatility
+                ]
+                
+                # Add beta as a feature if available
+                if beta_value is not None:
+                    features.append(float(beta_value))
+                
+                # Set feature_count on first iteration to ensure all features have same dimensions
+                if feature_count is None:
+                    feature_count = len(features)
+                
+                # Only add features if they match the expected count
+                if len(features) == feature_count:
+                    try:
+                        # Target: Will the price go up in the next 'days_to_predict' days?
+                        future_price = float(group.iloc[i + days_to_predict]['ClosePrice'])
+                        current_price = float(current_data['ClosePrice'])
+                        
+                        # Classify as 1 (up), 0 (neutral), -1 (down) with adjusted thresholds
+                        percent_change = (future_price - current_price) / current_price * 100
+                        
+                        if percent_change > threshold_pct:  # Up more than threshold_pct
+                            target = 1
+                        elif percent_change < -threshold_pct:  # Down more than threshold_pct
+                            target = -1
+                        else:  # Between -threshold_pct and threshold_pct
+                            target = 0
+                        
+                        all_features.append(features)
+                        all_targets.append(target)
+                        all_stock_codes.append(stock_code)
+                        all_dates.append(current_data['TradeDate'])
+                    except Exception as e:
+                        print(f"Error processing target for {stock_code}: {str(e)}")
+        except Exception as e:
+            print(f"Error calculating technical indicators for {stock_code}: {str(e)}")
     
-    # Convert lists to arrays
-    X = np.array(all_features)
-    y = np.array(all_targets)
+    # Convert lists to arrays with proper error handling
+    if not all_features:
+        print("No valid features found after processing. Check data quality.")
+        return np.array([]), np.array([]), [], []
     
-    return X, y, all_stock_codes, all_dates
+    try:
+        X = np.array(all_features, dtype=np.float32)
+        y = np.array(all_targets, dtype=np.int32)
+        
+        print(f"Feature shape: {X.shape}, Target shape: {y.shape}")
+        print(f"Feature example: {X[0]}")
+        
+        return X, y, all_stock_codes, all_dates
+    except Exception as e:
+        print(f"Error converting features to numpy array: {str(e)}")
+        print(f"Feature lengths: {[len(f) for f in all_features[:5]]}")
+        return np.array([]), np.array([]), [], []
 
 def calculate_technical_indicators(df):
     """Calculate various technical indicators for the dataframe"""
     # Price and volume data
     df = df.copy()
     
+    # Ensure all required columns are numeric
+    for col in ['ClosePrice', 'HighestPrice', 'LowestPrice', 'TotalVolume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
     # RSI (Relative Strength Index)
-    delta = df['ClosePrice'].astype(float).diff()
+    delta = df['ClosePrice'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
@@ -162,15 +198,16 @@ def calculate_technical_indicators(df):
     df['lower_band'] = df['20sma'] - (df['volatility_20'] * 2)
     
     # OBV (On-Balance Volume)
-    df['daily_ret'] = df['ClosePrice'].astype(float).pct_change()
+    df['daily_ret'] = df['ClosePrice'].pct_change()
     df['direction'] = np.where(df['daily_ret'] > 0, 1, -1)
+    # Fix SettingWithCopyWarning by using .loc instead of direct assignment
     df.loc[df['daily_ret'] == 0, 'direction'] = 0
-    df['obv'] = (pd.to_numeric(df['TotalVolume']) * df['direction']).cumsum()
+    df['obv'] = (df['TotalVolume'] * df['direction']).cumsum()
     
     # ATR (Average True Range)
-    df['high_low'] = df['HighestPrice'].astype(float) - df['LowestPrice'].astype(float)
-    df['high_close'] = abs(df['HighestPrice'].astype(float) - df['ClosePrice'].astype(float).shift())
-    df['low_close'] = abs(df['LowestPrice'].astype(float) - df['ClosePrice'].astype(float).shift())
+    df['high_low'] = df['HighestPrice'] - df['LowestPrice']
+    df['high_close'] = abs(df['HighestPrice'] - df['ClosePrice'].shift())
+    df['low_close'] = abs(df['LowestPrice'] - df['ClosePrice'].shift())
     df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
     df['atr_14'] = df['tr'].rolling(window=14).mean()
     
@@ -188,6 +225,11 @@ def train_svm_model(X, y, days_to_predict=5):
     Returns:
     tuple: (model, scaler, accuracy, report, confusion_matrix)
     """
+    # Skip training if data is empty
+    if len(X) == 0 or len(y) == 0:
+        print("No data available for training. Skipping model training.")
+        return None, None, 0.0, {}, [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+    
     # Convert target classes (-1, 0, 1) to (0, 1, 2) for PyTorch
     y_adjusted = y + 1
     
@@ -232,7 +274,7 @@ def train_svm_model(X, y, days_to_predict=5):
     # Use Adam optimizer for better convergence
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
-    # Learning rate scheduler
+    # Learning rate scheduler - remove verbose parameter to fix warning
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
     
     # Training loop with early stopping
